@@ -12,19 +12,18 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import pandas as pd
 
 # --- Configuration ---
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7527888676:AAEul4nktWJT2Bt7vciEsC9ukHfV1bTx-ck")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
 BSE_API_URL = "https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w"
 PDF_BASE_URL = "https://www.bseindia.com/xml-data/corpfiling/AttachLive/"
 IST = pytz.timezone('Asia/Kolkata')
 COMPANY_LIST_CSV = 'bse_company_list_cleaned.csv' 
 
-# --- Supabase Configuration ---
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://vvoeipguhywbkkklkszd.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ2b2VpcGd1aHl3Ymtra2xrc3pkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQzODA5OTQsImV4cCI6MjA2OTk1Njk5NH0.nvgJvuKy5DotyDqkhUcjSRAHXnlBBa4hHcudaHJuTaQ")
 supabase: Client = None
 
 # --- Shared Resources ---
-# Use a consistent set of headers for all requests to the BSE website
 BSE_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36', 'Referer': 'https://www.bseindia.com/'}
 
 # --- Flask App Initialization ---
@@ -46,6 +45,9 @@ def log_message(message):
 def get_supabase_client():
     global supabase
     if supabase is None:
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            log_message("CRITICAL ERROR: Supabase URL or Key not set in environment variables. Database operations will fail.")
+            return None
         try:
             supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
             log_message("Supabase client initialized.")
@@ -238,7 +240,6 @@ def send_telegram_text(chat_id, message):
 def send_telegram_document(chat_id, pdf_name, caption):
     pdf_url = f"{PDF_BASE_URL}{pdf_name}"
     try:
-        # --- FIXED: Use shared BSE_HEADERS for downloading the PDF ---
         pdf_response = requests.get(pdf_url, timeout=30, headers=BSE_HEADERS)
         if pdf_response.status_code != 200 or not pdf_response.content:
             log_message(f"Failed to download PDF: {pdf_url} (Status: {pdf_response.status_code})")
@@ -297,9 +298,6 @@ def process_announcements_for_scrip(scrip_code, recipients, cutoff_time_ist):
                 log_message(f"  [FOUND NEW] {headline} for {scrip_code}")
                 caption = f"<b>Scrip:</b> {scrip_code}\n<b>Announcement:</b> {headline}\n<b>Date:</b> {ann_date_ist.strftime('%d-%m-%Y %H:%M')} IST"
                 
-                for recipient in recipients:
-                    send_telegram_document(recipient['chat_id'], pdf_name, caption)
-                
                 db_save_announcement(
                     news_id=news_id,
                     scrip_code=scrip_code,
@@ -308,6 +306,10 @@ def process_announcements_for_scrip(scrip_code, recipients, cutoff_time_ist):
                     ann_date_ist=ann_date_ist,
                     caption=caption
                 )
+
+                for recipient in recipients:
+                    send_telegram_document(recipient['chat_id'], pdf_name, caption)
+                
     except Exception as e:
         log_message(f"Scrape failed for {scrip_code}: {e}")
 
@@ -337,6 +339,12 @@ def index():
     return render_template_string(HTML_TEMPLATE, 
                                   monitored_scrips=db_read_monitored_scrips(), 
                                   telegram_recipients=db_read_telegram_recipients())
+
+# --- ADDED: A dedicated health check / ping route ---
+@app.route('/health')
+def health_check():
+    """A simple endpoint for Render's health checks."""
+    return "OK", 200
 
 @app.route('/search')
 def search_stocks():
@@ -420,7 +428,9 @@ def delete_recipient():
 if __name__ == '__main__':
     get_supabase_client()
     scheduler = BackgroundScheduler(daemon=True)
-    scheduler.add_job(scheduled_announcement_check, 'interval', minutes=5, next_run_time=datetime.now())
+    # Delay the first run by 30 seconds to allow the server to become healthy
+    initial_run_time = datetime.now() + timedelta(seconds=30)
+    scheduler.add_job(scheduled_announcement_check, 'interval', minutes=5, next_run_time=initial_run_time)
     scheduler.start()
-    log_message("Scheduler started. Running initial check now and then every 5 minutes.")
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), use_reloader=False)
+    log_message("Scheduler started. First check in 30 seconds, then every 5 minutes.")
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), use_reloader=False)
