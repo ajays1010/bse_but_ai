@@ -1,4 +1,5 @@
 requests
+gunicorn
 flask
 pytz
 supabase
