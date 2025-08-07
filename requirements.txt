@@ -1,0 +1,7 @@
+requests
+flask
+pytz
+supabase
+apscheduler
+pandas
+datetime
