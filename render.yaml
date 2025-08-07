@@ -16,7 +16,7 @@ services:
     # The command to install dependencies from your requirements.txt file
     buildCommand: "pip install -r requirements.txt"
     # The command to start the Gunicorn web server
-    startCommand: "gunicorn app:app"
+    startCommand: "gunicorn --bind 0.0.0.0:$PORT app:app"
     # Define the environment variables required by the application.
     # You will need to set the actual values in the Render dashboard.
     envVars:
