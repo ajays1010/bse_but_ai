@@ -5,8 +5,10 @@
 # 4. Fill in the required Environment Variables in the Render UI.
 
 services:
-  - type: web
-    name: bse-announcement-bot
+  - type: worker
+    name: bse-monitor
+    plan: free
+    runtime: python
     # Use 'python' for the environment
     env: python
     # Specify the Python version. It's good practice to be explicit.
