@@ -1,0 +1,27 @@
+# This is the configuration file for deploying the BSE Bot on Render.
+# 1. Commit this file to your GitHub repository.
+# 2. Go to the Render dashboard and create a new "Blueprint Instance".
+# 3. Connect the repository containing this file.
+# 4. Fill in the required Environment Variables in the Render UI.
+
+services:
+  - type: web
+    name: bse-announcement-bot
+    # Use 'python' for the environment
+    env: python
+    # Specify the Python version. It's good practice to be explicit.
+    pythonVersion: '3.11'
+    # The command to install dependencies from your requirements.txt file
+    buildCommand: "pip install -r requirements.txt"
+    # The command to start the Gunicorn web server
+    startCommand: "gunicorn app:app"
+    # Define the environment variables required by the application.
+    # You will need to set the actual values in the Render dashboard.
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        # This tells Render to not sync the secret value back to this file.
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
