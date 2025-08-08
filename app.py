@@ -334,6 +334,7 @@ def process_announcements_for_scrip(scrip_code, recipients, cutoff_time_ist):
 
 def announcement_check_task():
     """The main task, now triggered by the external cron job."""
+    # --- FIXED: Add the application context to the background thread ---
     with app.app_context():
         log_message("--- Announcement check triggered ---")
         now_ist = datetime.now(IST)
@@ -364,7 +365,6 @@ def health_check():
     """A simple endpoint for Render's health checks."""
     return "OK", 200
 
-# --- MODIFIED: This is now the primary trigger for the scheduled check ---
 @app.route('/trigger_check/<secret_key>')
 def trigger_check(secret_key):
     """Triggers the announcement check if the secret key is valid."""
@@ -376,7 +376,6 @@ def trigger_check(secret_key):
     threading.Thread(target=announcement_check_task).start()
     return "Check triggered.", 200
 
-# --- ADDED: A manual trigger route for the button on the dashboard ---
 @app.route('/trigger_check_manual', methods=['POST'])
 def trigger_check_manual():
     log_message("Manual trigger received from dashboard.")
@@ -392,6 +391,11 @@ def search_stocks():
     matches = company_df[mask].head(10)
     return jsonify({"matches": matches.to_dict('records')})
 
+def process_new_scrip_task(code, recipients, cutoff_time):
+    """A dedicated task for processing a newly added scrip with app context."""
+    with app.app_context():
+        process_announcements_for_scrip(code, recipients, cutoff_time)
+
 @app.route('/add_scrip', methods=['POST'])
 def add_scrip():
     sb = get_supabase_client()
@@ -404,7 +408,8 @@ def add_scrip():
             log_message(f"New scrip {code} added. Triggering immediate check.")
             recipients = db_read_telegram_recipients()
             cutoff_time = datetime.now(IST) - timedelta(hours=24)
-            threading.Thread(target=process_announcements_for_scrip, args=(code, recipients, cutoff_time)).start()
+            # --- FIXED: Use a dedicated task with app context ---
+            threading.Thread(target=process_new_scrip_task, args=(code, recipients, cutoff_time)).start()
         except Exception as e:
             log_message(f"DB add scrip failed: {e}")
     return redirect(url_for('index'))
@@ -464,6 +469,5 @@ def delete_recipient():
 
 if __name__ == '__main__':
     get_supabase_client()
-    # The internal scheduler has been removed to rely solely on the external trigger.
     log_message("Application started. Waiting for external trigger to check announcements.")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), use_reloader=False)
