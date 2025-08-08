@@ -8,13 +8,16 @@ import json
 import pytz
 import threading
 from supabase import create_client, Client
-from apscheduler.schedulers.background import BackgroundScheduler
+# APScheduler is no longer needed and has been removed
 import pandas as pd
 
 # --- Configuration ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+# A secret key to protect the trigger endpoint
+CRON_SECRET_KEY = os.environ.get("CRON_SECRET_KEY")
+
 
 BSE_API_URL = "https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w"
 PDF_BASE_URL = "https://www.bseindia.com/xml-data/corpfiling/AttachLive/"
@@ -67,58 +70,70 @@ HTML_TEMPLATE = """
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-gray-100">
-    <div class="container mx-auto p-4 md:p-8 grid grid-cols-1 lg:grid-cols-2 gap-8">
-        
-        <div class="bg-white p-6 rounded-lg shadow-lg">
-            <h2 class="text-xl font-semibold mb-4">Monitor New Scrip</h2>
-            <div class="relative mb-6">
-                <input type="text" id="search-box" placeholder="Search by name or scrip code..." class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700" autocomplete="off">
-                <div id="search-results" class="absolute z-10 w-full bg-white border mt-1 rounded-lg shadow-lg hidden"></div>
+    <div class="container mx-auto p-4 md:p-8">
+        <h1 class="text-3xl font-bold mb-6 text-center text-gray-800">BSE Bot Dashboard</h1>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <div class="bg-white p-6 rounded-lg shadow-lg">
+                <h2 class="text-xl font-semibold mb-4">Monitor New Scrip</h2>
+                <div class="relative mb-6">
+                    <input type="text" id="search-box" placeholder="Search by name or scrip code..." class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700" autocomplete="off">
+                    <div id="search-results" class="absolute z-10 w-full bg-white border mt-1 rounded-lg shadow-lg hidden"></div>
+                </div>
+                <h3 class="text-lg font-semibold mb-4 border-t pt-4">Monitored Scrips</h3>
+                <div class="overflow-y-auto max-h-96">
+                    <table class="min-w-full bg-white">
+                        <tbody>
+                            {% for scrip in monitored_scrips %}
+                            <tr class="border-b">
+                                <td class="py-2 px-4"><b>{{ scrip.bse_code }}</b><br><span class="text-sm text-gray-600">{{ scrip.company_name }}</span></td>
+                                <td class="py-2 px-4 text-right">
+                                    <form action="/delete_scrip" method="post" class="inline-block">
+                                        <input type="hidden" name="scrip_code" value="{{ scrip.bse_code }}">
+                                        <button type="submit" class="bg-red-500 hover:bg-red-700 text-white text-xs font-bold py-1 px-2 rounded">Delete</button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
             </div>
-            <h3 class="text-lg font-semibold mb-4 border-t pt-4">Monitored Scrips</h3>
-            <div class="overflow-y-auto max-h-96">
-                <table class="min-w-full bg-white">
-                    <tbody>
-                        {% for scrip in monitored_scrips %}
-                        <tr class="border-b">
-                            <td class="py-2 px-4"><b>{{ scrip.bse_code }}</b><br><span class="text-sm text-gray-600">{{ scrip.company_name }}</span></td>
-                            <td class="py-2 px-4 text-right">
-                                <form action="/delete_scrip" method="post" class="inline-block">
-                                    <input type="hidden" name="scrip_code" value="{{ scrip.bse_code }}">
-                                    <button type="submit" class="bg-red-500 hover:bg-red-700 text-white text-xs font-bold py-1 px-2 rounded">Delete</button>
-                                </form>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+
+            <div class="bg-white p-6 rounded-lg shadow-lg">
+                <h2 class="text-xl font-semibold mb-4">Add Telegram Recipient</h2>
+                <form action="/add_recipient" method="post" class="flex items-center gap-4 mb-6">
+                    <input type="text" name="chat_id" placeholder="Enter Telegram Chat ID" class="shadow border rounded w-full py-2 px-3 text-gray-700" required>
+                    <button type="submit" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">Add</button>
+                </form>
+                <h3 class="text-lg font-semibold mb-4 border-t pt-4">Notification Recipients</h3>
+                <div class="overflow-y-auto max-h-96">
+                    <table class="min-w-full bg-white">
+                        <tbody>
+                            {% for recipient in telegram_recipients %}
+                            <tr class="border-b">
+                                <td class="py-2 px-4">{{ recipient.chat_id }}</td>
+                                <td class="py-2 px-4 text-right">
+                                    <form action="/delete_recipient" method="post" class="inline-block">
+                                        <input type="hidden" name="chat_id" value="{{ recipient.chat_id }}">
+                                        <button type="submit" class="bg-red-500 hover:bg-red-700 text-white text-xs font-bold py-1 px-2 rounded">Delete</button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
-
-        <div class="bg-white p-6 rounded-lg shadow-lg">
-            <h2 class="text-xl font-semibold mb-4">Add Telegram Recipient</h2>
-            <form action="/add_recipient" method="post" class="flex items-center gap-4 mb-6">
-                <input type="text" name="chat_id" placeholder="Enter Telegram Chat ID" class="shadow border rounded w-full py-2 px-3 text-gray-700" required>
-                <button type="submit" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">Add</button>
+        <!-- ADDED: Manual Trigger Section -->
+        <div class="bg-white p-6 rounded-lg shadow-lg mt-8">
+            <h2 class="text-xl font-semibold mb-4">Manual Trigger</h2>
+            <p class="text-gray-600 mb-4">This will run the announcement check immediately. This is the same action performed by the external cron job.</p>
+            <form action="/trigger_check_manual" method="post">
+                <button type="submit" class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded w-full">
+                    Trigger Announcement Check Now
+                </button>
             </form>
-            <h3 class="text-lg font-semibold mb-4 border-t pt-4">Notification Recipients</h3>
-            <div class="overflow-y-auto max-h-96">
-                <table class="min-w-full bg-white">
-                    <tbody>
-                        {% for recipient in telegram_recipients %}
-                        <tr class="border-b">
-                            <td class="py-2 px-4">{{ recipient.chat_id }}</td>
-                            <td class="py-2 px-4 text-right">
-                                <form action="/delete_recipient" method="post" class="inline-block">
-                                    <input type="hidden" name="chat_id" value="{{ recipient.chat_id }}">
-                                    <button type="submit" class="bg-red-500 hover:bg-red-700 text-white text-xs font-bold py-1 px-2 rounded">Delete</button>
-                                </form>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
         </div>
     </div>
     <script>
@@ -237,17 +252,21 @@ def send_telegram_text(chat_id, message):
         log_message(f"  [TELEGRAM] > Text send failed for {chat_id}: {e}")
     return False
 
-def send_telegram_document(chat_id, pdf_name, caption):
-    pdf_url = f"{PDF_BASE_URL}{pdf_name}"
+def send_telegram_document(chat_id, pdf_name, caption, pdf_content=None):
     try:
-        pdf_response = requests.get(pdf_url, timeout=30, headers=BSE_HEADERS)
-        if pdf_response.status_code != 200 or not pdf_response.content:
-            log_message(f"Failed to download PDF: {pdf_url} (Status: {pdf_response.status_code})")
-            return False
+        if pdf_content is None:
+            pdf_url = f"{PDF_BASE_URL}{pdf_name}"
+            pdf_response = requests.get(pdf_url, timeout=30, headers=BSE_HEADERS)
+            if pdf_response.status_code != 200 or not pdf_response.content:
+                log_message(f"Failed to download PDF: {pdf_url} (Status: {pdf_response.status_code})")
+                return False
+            pdf_content = pdf_response.content
         
+        final_caption = caption
+
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-        payload = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
-        files = {"document": (pdf_name, pdf_response.content, "application/pdf")}
+        payload = {"chat_id": chat_id, "caption": final_caption, "parse_mode": "HTML"}
+        files = {"document": (pdf_name, pdf_content, "application/pdf")}
         
         log_message(f"  [TELEGRAM] > Sending document '{pdf_name}' to chat_id: {chat_id}")
         tg_response = requests.post(url, data=payload, files=files, timeout=45)
@@ -313,13 +332,13 @@ def process_announcements_for_scrip(scrip_code, recipients, cutoff_time_ist):
     except Exception as e:
         log_message(f"Scrape failed for {scrip_code}: {e}")
 
-def scheduled_announcement_check():
-    """The main job run by the scheduler."""
+def announcement_check_task():
+    """The main task, now triggered by the external cron job."""
     with app.app_context():
-        log_message("--- Running scheduled check ---")
+        log_message("--- Announcement check triggered ---")
         now_ist = datetime.now(IST)
         
-        cutoff_time = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff_time = now_ist - timedelta(hours=24)
         log_message(f"Checking for all announcements since {cutoff_time.strftime('%Y-%m-%d %H:%M:%S')} IST")
         
         monitored_scrips = db_read_monitored_scrips()
@@ -331,7 +350,7 @@ def scheduled_announcement_check():
 
         for scrip in monitored_scrips:
             process_announcements_for_scrip(scrip['bse_code'], recipients, cutoff_time)
-        log_message("--- Scheduled check finished. ---")
+        log_message("--- Announcement check finished. ---")
 
 # --- Flask Routes ---
 @app.route('/')
@@ -340,11 +359,29 @@ def index():
                                   monitored_scrips=db_read_monitored_scrips(), 
                                   telegram_recipients=db_read_telegram_recipients())
 
-# --- ADDED: A dedicated health check / ping route ---
 @app.route('/health')
 def health_check():
     """A simple endpoint for Render's health checks."""
     return "OK", 200
+
+# --- MODIFIED: This is now the primary trigger for the scheduled check ---
+@app.route('/trigger_check/<secret_key>')
+def trigger_check(secret_key):
+    """Triggers the announcement check if the secret key is valid."""
+    if not CRON_SECRET_KEY or secret_key != CRON_SECRET_KEY:
+        log_message("Unauthorized attempt to trigger check.")
+        return "Unauthorized", 403
+    
+    log_message("External trigger received. Starting check in background.")
+    threading.Thread(target=announcement_check_task).start()
+    return "Check triggered.", 200
+
+# --- ADDED: A manual trigger route for the button on the dashboard ---
+@app.route('/trigger_check_manual', methods=['POST'])
+def trigger_check_manual():
+    log_message("Manual trigger received from dashboard.")
+    threading.Thread(target=announcement_check_task).start()
+    return redirect(url_for('index'))
 
 @app.route('/search')
 def search_stocks():
@@ -366,7 +403,7 @@ def add_scrip():
             sb.table('monitored_scrips').upsert({'bse_code': code, 'company_name': name}).execute()
             log_message(f"New scrip {code} added. Triggering immediate check.")
             recipients = db_read_telegram_recipients()
-            cutoff_time = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+            cutoff_time = datetime.now(IST) - timedelta(hours=24)
             threading.Thread(target=process_announcements_for_scrip, args=(code, recipients, cutoff_time)).start()
         except Exception as e:
             log_message(f"DB add scrip failed: {e}")
@@ -427,10 +464,6 @@ def delete_recipient():
 
 if __name__ == '__main__':
     get_supabase_client()
-    scheduler = BackgroundScheduler(daemon=True)
-    # Delay the first run by 30 seconds to allow the server to become healthy
-    initial_run_time = datetime.now() + timedelta(seconds=30)
-    scheduler.add_job(scheduled_announcement_check, 'interval', minutes=5, next_run_time=initial_run_time)
-    scheduler.start()
-    log_message("Scheduler started. First check in 30 seconds, then every 5 minutes.")
+    # The internal scheduler has been removed to rely solely on the external trigger.
+    log_message("Application started. Waiting for external trigger to check announcements.")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), use_reloader=False)
