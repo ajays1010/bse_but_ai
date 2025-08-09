@@ -12,7 +12,7 @@ services:
     env: python
     pythonVersion: '3.11'
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn --bind 0.0.0.0:$PORT app:app"
+    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 8 --timeout 120 --graceful-timeout 30"
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
