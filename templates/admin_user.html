@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Manage User · BSE Bot</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100">
+
+  <header class="bg-gray-800 text-white p-4 flex justify-between items-center">
+      <h1 class="text-xl font-bold">Manage User: <span class="font-mono">{{ user_id }}</span></h1>
+      <div class="flex items-center space-x-4">
+          <a href="{{ url_for('index') }}" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition duration-300">Home</a>
+          <a href="{{ url_for('admin_home') }}" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition duration-300">Admin</a>
+          <a href="{{ url_for('auth_logout') }}" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded transition duration-300">Logout</a>
+      </div>
+  </header>
+
+  <main class="container mx-auto mt-6 p-4 space-y-6">
+    <section class="bg-gray-800 shadow-lg rounded-lg p-6">
+      <h2 class="text-lg font-semibold mb-4">Subscriptions</h2>
+      <form action="{{ url_for('admin_add_sub', user_id=user_id) }}" method="post" class="flex items-center gap-3 mb-4">
+        <input name="bse_code" placeholder="BSE Code" class="bg-gray-700 border border-gray-600 rounded p-2" required />
+        <input name="company_name" placeholder="Company Name" class="bg-gray-700 border border-gray-600 rounded p-2 w-full" required />
+        <button class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded">Add</button>
+      </form>
+      <table class="min-w-full text-sm">
+        <tbody>
+          {% for s in subs %}
+          <tr class="border-b border-gray-700">
+            <td class="py-2 px-2"><b>{{ s.bse_code }}</b></td>
+            <td class="py-2 px-2 text-gray-300">{{ s.company_name }}</td>
+            <td class="py-2 px-2 text-right">
+              <form action="{{ url_for('admin_delete_sub', user_id=user_id) }}" method="post">
+                <input type="hidden" name="bse_code" value="{{ s.bse_code }}" />
+                <button class="bg-red-600 hover:bg-red-700 text-white py-1 px-2 rounded">Delete</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="bg-gray-800 shadow-lg rounded-lg p-6">
+      <h2 class="text-lg font-semibold mb-4">Telegram IDs</h2>
+      <form action="{{ url_for('admin_add_telegram', user_id=user_id) }}" method="post" class="flex items-center gap-3 mb-4">
+        <input name="chat_id" placeholder="Chat ID" class="bg-gray-700 border border-gray-600 rounded p-2 w-full" required />
+        <button class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded">Add</button>
+      </form>
+      <table class="min-w-full text-sm">
+        <tbody>
+          {% for t in telegrams %}
+          <tr class="border-b border-gray-700">
+            <td class="py-2 px-2">{{ t.chat_id }}</td>
+            <td class="py-2 px-2 text-right">
+              <form action="{{ url_for('admin_delete_telegram', user_id=user_id) }}" method="post">
+                <input type="hidden" name="chat_id" value="{{ t.chat_id }}" />
+                <button class="bg-red-600 hover:bg-red-700 text-white py-1 px-2 rounded">Delete</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+</body>
+</html>
+
+

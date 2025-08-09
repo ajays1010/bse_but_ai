@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Manage Users · BSE Bot Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100">
+
+    <!-- Header -->
+    <header class="bg-gray-800 text-white p-4 flex justify-between items-center">
+        <h1 class="text-2xl font-bold">Manage Users</h1>
+        <div class="flex items-center space-x-4">
+            <a href="{{ url_for('index') }}" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition duration-300">Home</a>
+            <a href="{{ url_for('admin_home') }}" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition duration-300">Admin Dashboard</a>
+            <a href="{{ url_for('auth_logout') }}" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded transition duration-300">Logout</a>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="container mx-auto mt-6 p-4">
+        <div class="bg-gray-800 shadow-lg rounded-lg p-6 max-w-md mx-auto">
+            <h2 class="text-xl font-semibold mb-4 text-white">Select a User to Manage</h2>
+            <div class="relative">
+                <select id="user-select" class="block w-full bg-gray-700 border border-gray-600 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                    <option selected disabled>-- Choose a user --</option>
+                    {% for u in users %}
+                        <option value="{{ url_for('admin_user_detail', user_id=u.id) }}">{{ u.full_name or u.email }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button id="manage-user-btn" class="mt-4 w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded transition duration-300 disabled:opacity-50" disabled>Go to User's Profile</button>
+        </div>
+    </main>
+
+    <script>
+        const userSelect = document.getElementById('user-select');
+        const manageBtn = document.getElementById('manage-user-btn');
+        userSelect.addEventListener('change', () => {
+            manageBtn.disabled = !userSelect.value;
+        });
+        manageBtn.addEventListener('click', () => {
+            const destination = userSelect.value;
+            if (destination) {
+                window.location.href = destination;
+            }
+        });
+    </script>
+
+</body>
+</html>
+
+

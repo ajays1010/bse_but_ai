@@ -1,374 +1,286 @@
 import os
-import requests
 import time
-import random
-from flask import Flask, request, render_template_string, redirect, url_for, jsonify
-from datetime import datetime, timedelta
-import json
-import pytz
 import threading
-from supabase import create_client, Client
-# APScheduler is no longer needed and has been removed
 import pandas as pd
+from flask import Flask, request, render_template, redirect, url_for, jsonify, make_response, Response
+from datetime import datetime, timedelta
+from functools import wraps
 
-# --- Configuration ---
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-# A secret key to protect the trigger endpoint
-CRON_SECRET_KEY = os.environ.get("CRON_SECRET_KEY")
-
-
-BSE_API_URL = "https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w"
-PDF_BASE_URL = "https://www.bseindia.com/xml-data/corpfiling/AttachLive/"
-IST = pytz.timezone('Asia/Kolkata')
-COMPANY_LIST_CSV = 'bse_company_list_cleaned.csv' 
-
-supabase: Client = None
-
-# --- Shared Resources ---
-BSE_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36', 'Referer': 'https://www.bseindia.com/'}
+# Service-layer imports
+from services.config import AppConfig
+from services.logger import log_message
+from services.db_service import (
+    get_supabase_client,
+    db_get_seen_announcements_for_today,
+    db_read_all_subscribed_scrips,
+    user_read_subscriptions,
+    user_add_subscription,
+    user_delete_subscription,
+    is_admin_by_user_id,
+    admin_list_users,
+    admin_list_users_for_interface,
+    admin_list_user_subs,
+    admin_upsert_user_sub,
+    admin_delete_user_sub,
+    admin_list_user_telegrams,
+    admin_add_user_telegram,
+    admin_delete_user_telegram,
+    user_list_telegrams,
+    user_add_telegram,
+    user_delete_telegram,
+    user_get_profile,
+    auth_sign_in,
+    auth_sign_up,
+)
+from services.bse_service import process_announcements_for_scrip
+from services.telegram_service import send_telegram_text
+from services.scheduler_service import start_scheduler
+from services.memory_guard import start_memory_watchdog, is_memory_ok, should_allow_ai
+from services.security import sign_token, verify_token
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
+app.secret_key = AppConfig.CRON_SECRET_KEY
+app.json.compact = False
+
+# --- Decorators ---
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user_id = request.cookies.get('sb_user_id')
+        if not user_id or not is_admin_by_user_id(user_id):
+            log_message(f"Unauthorized admin access attempt. UserID: {user_id}")
+            return redirect(url_for('index'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# --- Background scheduler guard ---
+_scheduler_started = False
+def _start_scheduler_once():
+    global _scheduler_started
+    if _scheduler_started:
+        return
+    try:
+        start_memory_watchdog()
+        start_scheduler(300, announcement_check_task)
+        _scheduler_started = True
+        log_message("Background scheduler running: checks every 5 minutes.")
+    except Exception as e:
+        log_message(f"[SCHED] Failed to start background scheduler: {e}")
+
+# Ensure scheduler starts when app serves the first request (works under Gunicorn)
+# Note: before_first_request was removed in Flask 3.0, using before_request with flag instead
+_first_request_done = False
+
+@app.before_request
+def _ensure_scheduler():
+    global _first_request_done
+    if not _first_request_done:
+        _start_scheduler_once()
+        _first_request_done = True
 
 # --- Load local company data into memory ---
 try:
-    company_df = pd.read_csv(COMPANY_LIST_CSV)
+    company_df = pd.read_csv(AppConfig.COMPANY_LIST_CSV)
     company_df['BSE Code'] = company_df['BSE Code'].astype(str)
 except FileNotFoundError:
-    print(f"[CRITICAL ERROR] The company list '{COMPANY_LIST_CSV}' was not found. Search will not work.")
+    print(f"[CRITICAL ERROR] The company list '{AppConfig.COMPANY_LIST_CSV}' was not found. Search will not work.")
     company_df = pd.DataFrame(columns=['BSE Code', 'Company Name'])
-
-# --- Logging Function ---
-def log_message(message):
-    print(f"[{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}] {message}")
-
-# --- Supabase Client Initialization ---
-def get_supabase_client():
-    global supabase
-    if supabase is None:
-        if not SUPABASE_URL or not SUPABASE_KEY:
-            log_message("CRITICAL ERROR: Supabase URL or Key not set in environment variables. Database operations will fail.")
-            return None
-        try:
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-            log_message("Supabase client initialized.")
-        except Exception as e:
-            log_message(f"Error initializing Supabase client: {e}")
-            supabase = None
-    return supabase
-
-# --- START: HTML Template for the Web UI ---
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BSE Bot Dashboard</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-gray-100">
-    <div class="container mx-auto p-4 md:p-8">
-        <h1 class="text-3xl font-bold mb-6 text-center text-gray-800">BSE Bot Dashboard</h1>
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            <div class="bg-white p-6 rounded-lg shadow-lg">
-                <h2 class="text-xl font-semibold mb-4">Monitor New Scrip</h2>
-                <div class="relative mb-6">
-                    <input type="text" id="search-box" placeholder="Search by name or scrip code..." class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700" autocomplete="off">
-                    <div id="search-results" class="absolute z-10 w-full bg-white border mt-1 rounded-lg shadow-lg hidden"></div>
-                </div>
-                <h3 class="text-lg font-semibold mb-4 border-t pt-4">Monitored Scrips</h3>
-                <div class="overflow-y-auto max-h-96">
-                    <table class="min-w-full bg-white">
-                        <tbody>
-                            {% for scrip in monitored_scrips %}
-                            <tr class="border-b">
-                                <td class="py-2 px-4"><b>{{ scrip.bse_code }}</b><br><span class="text-sm text-gray-600">{{ scrip.company_name }}</span></td>
-                                <td class="py-2 px-4 text-right">
-                                    <form action="/delete_scrip" method="post" class="inline-block">
-                                        <input type="hidden" name="scrip_code" value="{{ scrip.bse_code }}">
-                                        <button type="submit" class="bg-red-500 hover:bg-red-700 text-white text-xs font-bold py-1 px-2 rounded">Delete</button>
-                                    </form>
-                                </td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <div class="bg-white p-6 rounded-lg shadow-lg">
-                <h2 class="text-xl font-semibold mb-4">Add Telegram Recipient</h2>
-                <form action="/add_recipient" method="post" class="flex items-center gap-4 mb-6">
-                    <input type="text" name="chat_id" placeholder="Enter Telegram Chat ID" class="shadow border rounded w-full py-2 px-3 text-gray-700" required>
-                    <button type="submit" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">Add</button>
-                </form>
-                <h3 class="text-lg font-semibold mb-4 border-t pt-4">Notification Recipients</h3>
-                <div class="overflow-y-auto max-h-96">
-                    <table class="min-w-full bg-white">
-                        <tbody>
-                            {% for recipient in telegram_recipients %}
-                            <tr class="border-b">
-                                <td class="py-2 px-4">{{ recipient.chat_id }}</td>
-                                <td class="py-2 px-4 text-right">
-                                    <form action="/delete_recipient" method="post" class="inline-block">
-                                        <input type="hidden" name="chat_id" value="{{ recipient.chat_id }}">
-                                        <button type="submit" class="bg-red-500 hover:bg-red-700 text-white text-xs font-bold py-1 px-2 rounded">Delete</button>
-                                    </form>
-                                </td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-        <!-- ADDED: Manual Trigger Section -->
-        <div class="bg-white p-6 rounded-lg shadow-lg mt-8">
-            <h2 class="text-xl font-semibold mb-4">Manual Trigger</h2>
-            <p class="text-gray-600 mb-4">This will run the announcement check immediately. This is the same action performed by the external cron job.</p>
-            <form action="/trigger_check_manual" method="post">
-                <button type="submit" class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded w-full">
-                    Trigger Announcement Check Now
-                </button>
-            </form>
-        </div>
-    </div>
-    <script>
-        const searchBox = document.getElementById('search-box');
-        const searchResults = document.getElementById('search-results');
-        let debounceTimer;
-
-        searchBox.addEventListener('keyup', () => {
-            clearTimeout(debounceTimer);
-            const query = searchBox.value;
-            if (query.length < 2) { searchResults.classList.add('hidden'); return; }
-            debounceTimer = setTimeout(() => {
-                fetch(`/search?query=${query}`)
-                    .then(response => response.json())
-                    .then(data => {
-                        searchResults.innerHTML = '';
-                        if (data.matches && data.matches.length > 0) {
-                            data.matches.forEach(match => {
-                                const div = document.createElement('div');
-                                div.innerHTML = `<div class="p-3 hover:bg-gray-100 cursor-pointer"><p class="font-bold">${match['BSE Code']} <span class="font-normal text-gray-600">- ${match['Company Name']}</span></p></div>`;
-                                div.addEventListener('click', () => addScrip(match['BSE Code'], match['Company Name']));
-                                searchResults.appendChild(div);
-                            });
-                        } else {
-                            searchResults.innerHTML = `<div class="p-3 text-gray-500">No matches found.</div>`;
-                        }
-                        searchResults.classList.remove('hidden');
-                    });
-            }, 300);
-        });
-
-        function addScrip(scripCode, companyName) {
-            const form = document.createElement('form');
-            form.method = 'POST';
-            form.action = '/add_scrip';
-            form.innerHTML = `<input type="hidden" name="scrip_code" value="${scripCode}"><input type="hidden" name="company_name" value="${companyName}">`;
-            document.body.appendChild(form);
-            form.submit();
-        }
-
-        document.addEventListener('click', e => !searchBox.contains(e.target) && searchResults.classList.add('hidden'));
-    </script>
-</body>
-</html>
-"""
-# --- END: HTML Template for the Web UI ---
-
-# --- Supabase Handling Functions ---
-def db_read_monitored_scrips():
-    sb = get_supabase_client()
-    if not sb: return []
-    try:
-        return sb.table('monitored_scrips').select('bse_code, company_name').execute().data or []
-    except Exception as e:
-        log_message(f"DB Read monitored_scrips failed: {e}")
-        return []
-
-def db_read_telegram_recipients():
-    sb = get_supabase_client()
-    if not sb: return []
-    try:
-        return sb.table('telegram_recipients').select('chat_id').execute().data or []
-    except Exception as e:
-        log_message(f"DB Read telegram_recipients failed: {e}")
-        return []
-
-def db_get_seen_announcements_for_today():
-    sb = get_supabase_client()
-    if not sb: return []
-    try:
-        today_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        return sb.table('seen_announcements').select('*').gte('created_at', today_start).order('created_at').execute().data or []
-    except Exception as e:
-        log_message(f"DB Read seen_announcements failed: {e}")
-        return []
-
-def db_check_if_announcement_seen(news_id):
-    sb = get_supabase_client()
-    if not sb: return True
-    try:
-        response = sb.table('seen_announcements').select('news_id', count='exact').eq('news_id', news_id).execute()
-        return response.count > 0
-    except Exception as e:
-        log_message(f"DB check seen failed: {e}")
-        return True
-
-def db_save_announcement(news_id, scrip_code, headline, pdf_name, ann_date_ist, caption):
-    sb = get_supabase_client()
-    if not sb: return
-
-    announcement_data = {
-        'news_id': news_id,
-        'scrip_code': scrip_code,
-        'headline': headline,
-        'pdf_name': pdf_name,
-        'ann_date': ann_date_ist.isoformat(),
-        'caption': caption
-    }
-    try:
-        sb.table('seen_announcements').insert(announcement_data).execute()
-        log_message(f"  [DB LOG] > Saved announcement {news_id} for {scrip_code}")
-    except Exception as e:
-        log_message(f"  [DB LOG] > DB insert failed for {news_id}: {e}")
-
-# --- Telegram & Scraping Logic ---
-def send_telegram_text(chat_id, message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
-    try:
-        log_message(f"  [TELEGRAM] > Sending text to chat_id: {chat_id}")
-        response = requests.post(url, data=payload, timeout=10)
-        if response.json().get("ok"):
-            log_message(f"  [TELEGRAM] > Successfully sent text to {chat_id}")
-            return True
-    except Exception as e:
-        log_message(f"  [TELEGRAM] > Text send failed for {chat_id}: {e}")
-    return False
-
-def send_telegram_document(chat_id, pdf_name, caption, pdf_content=None):
-    try:
-        if pdf_content is None:
-            pdf_url = f"{PDF_BASE_URL}{pdf_name}"
-            pdf_response = requests.get(pdf_url, timeout=30, headers=BSE_HEADERS)
-            if pdf_response.status_code != 200 or not pdf_response.content:
-                log_message(f"Failed to download PDF: {pdf_url} (Status: {pdf_response.status_code})")
-                return False
-            pdf_content = pdf_response.content
-        
-        final_caption = caption
-
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-        payload = {"chat_id": chat_id, "caption": final_caption, "parse_mode": "HTML"}
-        files = {"document": (pdf_name, pdf_content, "application/pdf")}
-        
-        log_message(f"  [TELEGRAM] > Sending document '{pdf_name}' to chat_id: {chat_id}")
-        tg_response = requests.post(url, data=payload, files=files, timeout=45)
-        if tg_response.json().get("ok"):
-            log_message(f"  [TELEGRAM] > Successfully sent document to {chat_id}")
-            return True
-        else:
-            log_message(f"  [TELEGRAM] > API error for {chat_id}: {tg_response.text}")
-            return False
-    except Exception as e:
-        log_message(f"  [TELEGRAM] > Document send failed for {chat_id}: {e}")
-    return False
-
-def process_announcements_for_scrip(scrip_code, recipients, cutoff_time_ist):
-    log_message(f"-> Checking scrip: {scrip_code}")
-    from_date_obj = datetime.now(IST) - timedelta(days=7)
-    params = {'strCat': '-1', 'strPrevDate': from_date_obj.strftime('%Y%m%d'), 'strToDate': datetime.now(IST).strftime('%Y%m%d'), 'strScrip': scrip_code, 'strSearch': 'P', 'strType': 'C'}
-    
-    try:
-        response = requests.get(BSE_API_URL, headers=BSE_HEADERS, params=params, timeout=30)
-        data = response.json()
-        if not data.get('Table'): return
-
-        for announcement in data['Table']:
-            news_id = announcement.get('NEWSID')
-            pdf_name = announcement.get('ATTACHMENTNAME')
-            
-            if not news_id or not pdf_name:
-                continue
-
-            ann_date_str = announcement.get('NEWS_DT') or announcement.get('DissemDT')
-            if not ann_date_str or db_check_if_announcement_seen(news_id):
-                continue
-            
-            try:
-                naive_date = datetime.strptime(ann_date_str, '%d %b %Y %I:%M:%S %p')
-            except ValueError:
-                try: naive_date = datetime.strptime(ann_date_str, '%Y-%m-%dT%H:%M:%S.%f')
-                except ValueError:
-                    try: naive_date = datetime.strptime(ann_date_str, '%Y-%m-%dT%H:%M:%S')
-                    except ValueError: continue
-            
-            ann_date_ist = IST.localize(naive_date)
-
-            if ann_date_ist >= cutoff_time_ist:
-                headline = announcement.get('NEWSSUB') or announcement.get('HEADLINE', 'N/A')
-                
-                log_message(f"  [FOUND NEW] {headline} for {scrip_code}")
-                caption = f"<b>Scrip:</b> {scrip_code}\n<b>Announcement:</b> {headline}\n<b>Date:</b> {ann_date_ist.strftime('%d-%m-%Y %H:%M')} IST"
-                
-                db_save_announcement(
-                    news_id=news_id,
-                    scrip_code=scrip_code,
-                    headline=headline,
-                    pdf_name=pdf_name,
-                    ann_date_ist=ann_date_ist,
-                    caption=caption
-                )
-
-                for recipient in recipients:
-                    send_telegram_document(recipient['chat_id'], pdf_name, caption)
-                
-    except Exception as e:
-        log_message(f"Scrape failed for {scrip_code}: {e}")
 
 def announcement_check_task():
     """The main task, now triggered by the external cron job."""
-    # --- FIXED: Add the application context to the background thread ---
     with app.app_context():
         log_message("--- Announcement check triggered ---")
-        now_ist = datetime.now(IST)
+        now_ist = datetime.now(AppConfig.IST)
         
         cutoff_time = now_ist - timedelta(hours=24)
         log_message(f"Checking for all announcements since {cutoff_time.strftime('%Y-%m-%d %H:%M:%S')} IST")
         
-        monitored_scrips = db_read_monitored_scrips()
-        recipients = db_read_telegram_recipients()
-
-        if not monitored_scrips or not recipients:
-            log_message("--- No scrips or recipients. Skipping check. ---")
-            return
-
-        for scrip in monitored_scrips:
-            process_announcements_for_scrip(scrip['bse_code'], recipients, cutoff_time)
+        # Multi-user segregation: iterate each user, fetch their subs and recipients
+        users = admin_list_users() or []
+        any_work = False
+        for u in users:
+            if not u:
+                continue
+            user_id = u.get('id')
+            # Per-user subs and recipients
+            subs = admin_list_user_subs(user_id) or []
+            recs = admin_list_user_telegrams(user_id) or []
+            if not subs or not recs:
+                continue
+            any_work = True
+            recipients = [{'chat_id': r['chat_id'], 'user_id': user_id} for r in recs if r.get('chat_id')]
+            for s in subs:
+                code = s.get('bse_code')
+                if not code:
+                    continue
+                process_announcements_for_scrip(code, recipients, cutoff_time)
+        if not any_work:
+            log_message("--- No per-user subs/recipients. Skipping check. ---")
         log_message("--- Announcement check finished. ---")
 
 # --- Flask Routes ---
+def set_auth_cookies(response: Response, tokens: dict) -> Response:
+    """Helper to set access and refresh tokens in cookies."""
+    if tokens.get('access_token'):
+        response.set_cookie('sb_access_token', tokens['access_token'], httponly=True, samesite='Lax')
+    if tokens.get('refresh_token'):
+        response.set_cookie('sb_refresh_token', tokens['refresh_token'], httponly=True, samesite='Lax')
+    return response
+
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE, 
-                                  monitored_scrips=db_read_monitored_scrips(), 
-                                  telegram_recipients=db_read_telegram_recipients())
+    access_token = request.cookies.get('sb_access_token')
+    refresh_token = request.cookies.get('sb_refresh_token')
+    user_id = request.cookies.get('sb_user_id')
+
+    if not access_token:
+        return redirect(url_for('auth_login_page'))
+
+    # Check if the user has an admin role
+    is_admin = is_admin_by_user_id(user_id) if user_id else False
+
+    # The decorated function handles the refresh logic
+    user_scrips, new_tokens = user_read_subscriptions(
+        access_token=access_token,
+        refresh_token=refresh_token
+    )
+
+    # If the function failed completely (e.g., refresh token invalid), log the user out
+    if user_scrips is None:
+        return redirect(url_for('auth_logout'))
+
+    # Fetch user-scoped telegram recipients
+    recipients, new_tokens_rec = user_list_telegrams(
+        user_id=user_id,
+        access_token=access_token,
+        refresh_token=refresh_token
+    )
+    if recipients is None:
+        recipients = []
+
+    # Default render
+    response = make_response(render_template('index.html',
+                               monitored_scrips=user_scrips,
+                               telegram_recipients=recipients,
+                               is_admin=is_admin))
+
+    # If tokens were refreshed by either call, set the new ones in the cookie
+    combined_tokens = new_tokens_rec or new_tokens
+    if combined_tokens:
+        response = set_auth_cookies(response, combined_tokens)
+    
+    return response
 
 @app.route('/health')
 def health_check():
-    """A simple endpoint for Render's health checks."""
     return "OK", 200
+
+@app.route('/admin')
+@admin_required
+def admin_home():
+    # Provide dashboard plus an inline dropdown to jump to a user's page
+    access_token = request.cookies.get('sb_access_token')
+    all_users = admin_list_users_for_interface(access_token)
+    # Filter out privileged users from the interface
+    non_admin_users = [u for u in all_users if str(u.get('role', '')).strip().lower() not in ('admin', 'superuser')]
+    return render_template('admin.html', users=non_admin_users)
+
+@app.route('/admin/manage')
+@admin_required
+def admin_manage_page():
+    access_token = request.cookies.get('sb_access_token')
+    all_users = admin_list_users_for_interface(access_token)
+    # Filter out privileged users so admins can't edit other admins/superusers in this interface
+    non_admin_users = [u for u in all_users if str(u.get('role', '')).strip().lower() not in ('admin', 'superuser')]
+    return render_template('admin_manage.html', users=non_admin_users)
+
+@app.route('/admin/user/<user_id>')
+@admin_required
+def admin_user_detail(user_id):
+    subs = admin_list_user_subs(user_id)
+    telegrams = admin_list_user_telegrams(user_id)
+    return render_template('admin_user.html', user_id=user_id, subs=subs, telegrams=telegrams, is_admin=True)
+
+@app.route('/admin/user/<user_id>/add_sub', methods=['POST'])
+@admin_required
+def admin_add_sub(user_id: str):
+    code = request.form.get('bse_code','').strip()
+    name = request.form.get('company_name','').strip()
+    if code and name:
+        admin_upsert_user_sub(user_id, code, name)
+    return redirect(url_for('admin_user_detail', user_id=user_id))
+
+@app.route('/admin/user/<user_id>/delete_sub', methods=['POST'])
+@admin_required
+def admin_delete_sub(user_id: str):
+    code = request.form.get('bse_code','').strip()
+    if code:
+        admin_delete_user_sub(user_id, code)
+    return redirect(url_for('admin_user_detail', user_id=user_id))
+
+@app.route('/admin/user/<user_id>/add_telegram', methods=['POST'])
+@admin_required
+def admin_add_telegram(user_id: str):
+    chat_id = request.form.get('chat_id','').strip()
+    if chat_id:
+        admin_add_user_telegram(user_id, chat_id)
+    return redirect(url_for('admin_user_detail', user_id=user_id))
+
+@app.route('/admin/user/<user_id>/delete_telegram', methods=['POST'])
+@admin_required
+def admin_delete_telegram(user_id: str):
+    chat_id = request.form.get('chat_id','').strip()
+    if chat_id:
+        admin_delete_user_telegram(user_id, chat_id)
+    return redirect(url_for('admin_user_detail', user_id=user_id))
+
+@app.route('/auth/login', methods=['GET'])
+def auth_login_page():
+    return render_template('auth.html')
+
+@app.route('/auth/login', methods=['POST'])
+def auth_login():
+    email = request.form.get('email','').strip()
+    password = request.form.get('password','').strip()
+    result = auth_sign_in(email, password)
+    if not result or not result.get('access_token'):
+        return render_template('auth.html', error='Invalid credentials')
+    resp = make_response(redirect(url_for('index')))
+    # Cookie holds user session token for RLS-bound requests
+    set_auth_cookies(resp, {
+        'access_token': result['access_token'],
+        'refresh_token': result.get('refresh_token')
+    })
+    resp.set_cookie('sb_user_id', result.get('user_id') or '', httponly=True, samesite='Lax')
+    return resp
+
+@app.route('/auth/signup', methods=['GET'])
+def auth_signup_page():
+    return render_template('signup.html')
+
+@app.route('/auth/signup', methods=['POST'])
+def auth_signup():
+    email = request.form.get('email','').strip()
+    password = request.form.get('password','').strip()
+    full_name = request.form.get('full_name','').strip()
+    ok = auth_sign_up(email, password, full_name)
+    if not ok:
+        return render_template('signup.html', error='Sign up failed. Try a different email or try again later.')
+    return redirect(url_for('auth_login_page'))
+
+@app.route('/auth/logout')
+def auth_logout():
+    resp = make_response(redirect(url_for('auth_login_page')))
+    resp.delete_cookie('sb_access_token')
+    resp.delete_cookie('sb_refresh_token')
+    resp.delete_cookie('sb_user_id')
+    return resp
 
 @app.route('/trigger_check/<secret_key>')
 def trigger_check(secret_key):
     """Triggers the announcement check if the secret key is valid."""
-    if not CRON_SECRET_KEY or secret_key != CRON_SECRET_KEY:
+    if not AppConfig.CRON_SECRET_KEY or secret_key != AppConfig.CRON_SECRET_KEY:
         log_message("Unauthorized attempt to trigger check.")
         return "Unauthorized", 403
     
@@ -381,6 +293,34 @@ def trigger_check_manual():
     log_message("Manual trigger received from dashboard.")
     threading.Thread(target=announcement_check_task).start()
     return redirect(url_for('index'))
+
+
+@app.route('/v/<token>')
+def view_message(token: str):
+    """Secure view of a full message for a specific user/news.
+    Token payload: { user_id, news_id }
+    """
+    payload = verify_token(token)
+    if not payload:
+        return "Unauthorized", 403
+    request_user = request.cookies.get('sb_user_id')
+    if not request_user or request_user != payload.get('user_id'):
+        return "Unauthorized", 403
+
+    # Fetch from DB and render
+    from services.db_service import get_supabase_client
+    sb = get_supabase_client()
+    if not sb:
+        return "Service unavailable", 503
+    try:
+        rec = sb.table('seen_announcements').select('*').eq('news_id', payload.get('news_id')).eq('user_id', request_user).single().execute().data
+    except Exception:
+        rec = None
+    if not rec:
+        return "Not found", 404
+
+    # Render a special template with ethereal/telegram look
+    return render_template('view_message.html', caption=rec.get('caption'), company=rec.get('headline'), pdf_name=rec.get('pdf_name'))
 
 @app.route('/search')
 def search_stocks():
@@ -398,32 +338,66 @@ def process_new_scrip_task(code, recipients, cutoff_time):
 
 @app.route('/add_scrip', methods=['POST'])
 def add_scrip():
-    sb = get_supabase_client()
-    if not sb: return redirect(url_for('index'))
+    access_token = request.cookies.get('sb_access_token')
+    user_id = request.cookies.get('sb_user_id')
+    refresh_token = request.cookies.get('sb_refresh_token')
+
+    if not access_token or not user_id:
+        return redirect(url_for('auth_login_page'))
+
     code = request.form.get('scrip_code', '').strip()
     name = request.form.get('company_name', '').strip()
+
     if code and name:
-        try:
-            sb.table('monitored_scrips').upsert({'bse_code': code, 'company_name': name}).execute()
-            log_message(f"New scrip {code} added. Triggering immediate check.")
-            recipients = db_read_telegram_recipients()
-            cutoff_time = datetime.now(IST) - timedelta(hours=24)
-            # --- FIXED: Use a dedicated task with app context ---
+        ok, new_tokens = user_add_subscription(
+            user_id=user_id,
+            bse_code=code,
+            company_name=name,
+            access_token=access_token,
+            refresh_token=refresh_token
+        )
+
+        if ok is None: # Hard failure
+            return redirect(url_for('auth_logout'))
+        
+        if ok:
+            log_message(f"User {user_id} added scrip {code}. Triggering immediate check.")
+            recipients = admin_list_user_telegrams(user_id) or []
+            recipients = [{'chat_id': r['chat_id'], 'user_id': user_id} for r in recipients if r.get('chat_id')]
+            cutoff_time = datetime.now(AppConfig.IST) - timedelta(hours=24)
             threading.Thread(target=process_new_scrip_task, args=(code, recipients, cutoff_time)).start()
-        except Exception as e:
-            log_message(f"DB add scrip failed: {e}")
+        
+        response = make_response(redirect(url_for('index')))
+        if new_tokens:
+            response = set_auth_cookies(response, new_tokens)
+        return response
+
     return redirect(url_for('index'))
 
 @app.route('/delete_scrip', methods=['POST'])
 def delete_scrip():
-    sb = get_supabase_client()
-    if not sb: return redirect(url_for('index'))
+    access_token = request.cookies.get('sb_access_token')
+    refresh_token = request.cookies.get('sb_refresh_token')
+
+    if not access_token:
+        return redirect(url_for('auth_login_page'))
+
     code = request.form.get('scrip_code', '')
     if code:
-        try:
-            sb.table('monitored_scrips').delete().eq('bse_code', code).execute()
-        except Exception as e:
-            log_message(f"DB delete scrip failed: {e}")
+        ok, new_tokens = user_delete_subscription(
+            bse_code=code,
+            access_token=access_token,
+            refresh_token=refresh_token
+        )
+
+        if ok is None: # Hard failure
+            return redirect(url_for('auth_logout'))
+
+        response = make_response(redirect(url_for('index')))
+        if new_tokens:
+            response = set_auth_cookies(response, new_tokens)
+        return response
+        
     return redirect(url_for('index'))
 
 def catch_up_new_recipient(chat_id):
@@ -439,35 +413,80 @@ def catch_up_new_recipient(chat_id):
         time.sleep(2)
 
         for ann in announcements_today:
-            send_telegram_document(chat_id, ann['pdf_name'], ann['caption'])
+            send_telegram_text(chat_id, f"{ann['pdf_name']}\n\n{ann['caption']}")
         log_message(f"Finished catch-up for {chat_id}.")
 
-@app.route('/add_recipient', methods=['POST'])
+@app.route('/add_recipient', methods=['GET', 'POST'])
 def add_recipient():
-    sb = get_supabase_client()
-    if not sb: return redirect(url_for('index'))
+    # GET fallback: just go back to dashboard
+    if request.method == 'GET':
+        return redirect(url_for('index'))
+    # Backward-compatible: route now acts on current user's recipients
+    access_token = request.cookies.get('sb_access_token')
+    refresh_token = request.cookies.get('sb_refresh_token')
+    user_id = request.cookies.get('sb_user_id')
+    if not access_token or not user_id:
+        return redirect(url_for('auth_login_page'))
     chat_id = request.form.get('chat_id', '').strip()
     if chat_id:
-        try:
-            sb.table('telegram_recipients').upsert({'chat_id': chat_id}).execute()
+        ok, new_tokens = user_add_telegram(user_id=user_id, chat_id=chat_id, access_token=access_token, refresh_token=refresh_token)
+        if ok:
             threading.Thread(target=catch_up_new_recipient, args=(chat_id,)).start()
-        except Exception as e:
-            log_message(f"DB add recipient failed: {e}")
+        if ok is None:
+            return redirect(url_for('auth_logout'))
+        response = make_response(redirect(url_for('index')))
+        if new_tokens:
+            response = set_auth_cookies(response, new_tokens)
+        return response
     return redirect(url_for('index'))
 
-@app.route('/delete_recipient', methods=['POST'])
+@app.route('/delete_recipient', methods=['GET', 'POST'])
 def delete_recipient():
-    sb = get_supabase_client()
-    if not sb: return redirect(url_for('index'))
-    chat_id = request.form.get('chat_id', '')
+    if request.method == 'GET':
+        return redirect(url_for('index'))
+    access_token = request.cookies.get('sb_access_token')
+    refresh_token = request.cookies.get('sb_refresh_token')
+    user_id = request.cookies.get('sb_user_id')
+    if not access_token or not user_id:
+        return redirect(url_for('auth_login_page'))
+    chat_id = request.form.get('chat_id', '').strip()
     if chat_id:
-        try:
-            sb.table('telegram_recipients').delete().eq('chat_id', chat_id).execute()
-        except Exception as e:
-            log_message(f"DB delete recipient failed: {e}")
+        ok, new_tokens = user_delete_telegram(user_id=user_id, chat_id=chat_id, access_token=access_token, refresh_token=refresh_token)
+        if ok is None:
+            return redirect(url_for('auth_logout'))
+        response = make_response(redirect(url_for('index')))
+        if new_tokens:
+            response = set_auth_cookies(response, new_tokens)
+        return response
     return redirect(url_for('index'))
+
+@app.route('/me')
+def user_profile_page():
+    access_token = request.cookies.get('sb_access_token')
+    refresh_token = request.cookies.get('sb_refresh_token')
+    user_id = request.cookies.get('sb_user_id')
+    if not access_token or not user_id:
+        return redirect(url_for('auth_login_page'))
+    profile, new_tokens = user_get_profile(user_id=user_id, access_token=access_token, refresh_token=refresh_token)
+    if profile is None:
+        return redirect(url_for('auth_logout'))
+    # Also show this user's current subs and telegram ids
+    subs, new_tokens2 = user_read_subscriptions(access_token=access_token, refresh_token=refresh_token)
+    telegrams, new_tokens3 = user_list_telegrams(user_id=user_id, access_token=access_token, refresh_token=refresh_token)
+    response = make_response(render_template('me.html', profile=profile, subs=subs or [], telegrams=telegrams or []))
+    combined = new_tokens or new_tokens2 or new_tokens3
+    if combined:
+        response = set_auth_cookies(response, combined)
+    return response
 
 if __name__ == '__main__':
     get_supabase_client()
-    log_message("Application started. Waiting for external trigger to check announcements.")
+    # Log Gemini availability for clarity in ops
+    if not (os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')):
+        log_message("[AI] GEMINI_API_KEY not set. AI summaries are disabled.")
+    else:
+        log_message("[AI] GEMINI_API_KEY detected. AI summaries enabled.")
+    log_message("Application started. Scheduler should already be running. You can also trigger manually.")
+    # Start scheduler now that all functions are defined
+    _start_scheduler_once()
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), use_reloader=False)

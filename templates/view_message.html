@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Announcement</title>
+  <style>
+    :root {
+      --tg-bg: #17212b; /* Telegram dark */
+      --tg-card: #1f2c39;
+      --tg-accent: #54a9eb;
+      --tg-text: #e8eef5;
+      --blur: 14px;
+    }
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(135deg, #0f1420 0%, #1a2230 100%);
+    }
+    .bg-blur {
+      position: fixed; inset: 0; filter: blur(var(--blur)); opacity: 0.55;
+      background: url('/static/css/noise.png'), radial-gradient(1200px 800px at 30% 20%, rgba(84,169,235,0.18), transparent), radial-gradient(1000px 700px at 70% 80%, rgba(153,84,235,0.14), transparent);
+      pointer-events: none;
+    }
+    .card {
+      position: relative; width: min(780px, 92vw); max-height: 82vh; overflow: auto;
+      background: var(--tg-card); color: var(--tg-text);
+      border-radius: 16px; box-shadow: 0 20px 50px rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .card .header {
+      padding: 18px 22px; border-bottom: 1px solid rgba(255,255,255,0.06);
+      display: flex; align-items: center; gap: 12px;
+      background: linear-gradient(180deg, rgba(84,169,235,0.08), transparent);
+    }
+    .dot { width: 10px; height: 10px; background: var(--tg-accent); border-radius: 50%; box-shadow: 0 0 10px var(--tg-accent); }
+    .title { font-weight: 600; letter-spacing: 0.2px; }
+    .content { padding: 20px 22px; line-height: 1.6; font-size: 15.5px; }
+    .content b { color: #ffffff; }
+    .footer { padding: 14px 22px; display: flex; gap: 10px; align-items: center; border-top: 1px solid rgba(255,255,255,0.06); }
+    .btn { color: var(--tg-text); background: #223244; border: 1px solid rgba(255,255,255,0.08); padding: 10px 14px; border-radius: 10px; text-decoration: none; }
+    .btn:hover { border-color: var(--tg-accent); box-shadow: 0 0 0 3px rgba(84,169,235,0.18) inset; }
+  </style>
+</head>
+<body>
+  <div class="bg-blur"></div>
+  <main class="card" role="main" aria-label="Announcement">
+    <div class="header">
+      <div class="dot" aria-hidden></div>
+      <div class="title">Full Announcement</div>
+    </div>
+    <div class="content">
+      {{ caption|safe }}
+    </div>
+    <div class="footer">
+      {% if pdf_name %}
+      <a class="btn" href="/download/{{ pdf_name }}" target="_blank" rel="noopener">Download PDF</a>
+      {% endif %}
+      <a class="btn" href="/" rel="noopener">Back</a>
+    </div>
+  </main>
+</body>
+</html>
+
+
