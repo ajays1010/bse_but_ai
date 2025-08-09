@@ -1,7 +1,7 @@
 import yfinance as yf
 from typing import Dict, Any, Optional
 from .ticker_mapping_service import get_best_yahoo_symbol, get_company_name_for_code, ticker_mapper
-from .ai_service import fetch_market_data_via_gemini
+from .market_fallbacks import fetch_market_data_via_gemini
 import pandas as pd
 
 
