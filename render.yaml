@@ -27,3 +27,9 @@ services:
         sync: false
       - key: SUPABASE_KEY
         sync: false
+      - key: GEMINI_API_KEY
+        # Required for AI PDF summaries. If unset, the app will still run but summaries will be disabled.
+        sync: false
+      - key: GEMINI_MODEL
+        # Optional: override model name (default: gemini-2.5-flash)
+        value: gemini-2.5-flash

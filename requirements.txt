@@ -6,3 +6,6 @@ supabase
 apscheduler
 pandas
 datetime
+google-genai
+pypdf
+rich
