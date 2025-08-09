@@ -20,9 +20,11 @@
   <main class="container mx-auto mt-6 p-4 space-y-6">
     <section class="bg-gray-800 shadow-lg rounded-lg p-6">
       <h2 class="text-lg font-semibold mb-4">Subscriptions</h2>
-      <form action="{{ url_for('admin_add_sub', user_id=user_id) }}" method="post" class="flex items-center gap-3 mb-4">
-        <input name="bse_code" placeholder="BSE Code" class="bg-gray-700 border border-gray-600 rounded p-2" required />
-        <input name="company_name" placeholder="Company Name" class="bg-gray-700 border border-gray-600 rounded p-2 w-full" required />
+      <form action="{{ url_for('admin_add_sub', user_id=user_id) }}" method="post" class="flex items-center gap-3 mb-4 relative" id="admin-sub-form">
+        <input id="bse_code_input" name="bse_code" placeholder="BSE Code" class="bg-gray-700 border border-gray-600 rounded p-2" required />
+        <div class="flex-1 relative" id="search-container-admin">
+          <input id="company_name_input" name="company_name" placeholder="Company Name" class="w-full bg-gray-700 border border-gray-600 rounded p-2" autocomplete="off" required />
+        </div>
         <button class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded">Add</button>
       </form>
       <table class="min-w-full text-sm">
@@ -66,6 +68,91 @@
       </table>
     </section>
   </main>
+
+  <script>
+    // Fuzzy dropdown search (reuse behavior from dashboard)
+    const nameInput = document.getElementById('company_name_input');
+    const codeInput = document.getElementById('bse_code_input');
+    let resultsPanel = null;
+    let debounceTimer;
+
+    function ensureResultsPanel() {
+      if (resultsPanel) return resultsPanel;
+      resultsPanel = document.createElement('div');
+      resultsPanel.id = 'admin-search-results';
+      resultsPanel.style.position = 'fixed';
+      resultsPanel.style.zIndex = '1001';
+      resultsPanel.style.background = '#1f2937'; // gray-800
+      resultsPanel.style.border = '1px solid #4b5563'; // gray-600
+      resultsPanel.style.borderRadius = '8px';
+      resultsPanel.style.boxShadow = '0 10px 25px -5px rgba(0,0,0,0.5)';
+      resultsPanel.style.maxHeight = '300px';
+      resultsPanel.style.overflowY = 'auto';
+      resultsPanel.className = 'hidden';
+      document.body.appendChild(resultsPanel);
+      return resultsPanel;
+    }
+
+    function positionPanel() {
+      const rect = nameInput.getBoundingClientRect();
+      const panel = ensureResultsPanel();
+      panel.style.left = rect.left + 'px';
+      panel.style.top = (rect.bottom + 8) + 'px';
+      panel.style.width = rect.width + 'px';
+    }
+
+    function renderResults(items) {
+      const panel = ensureResultsPanel();
+      panel.innerHTML = '';
+      if (!items || items.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'p-3 text-sm text-gray-300 text-center';
+        empty.textContent = 'No matches found';
+        panel.appendChild(empty);
+      } else {
+        items.forEach(m => {
+          const row = document.createElement('div');
+          row.className = 'p-3 cursor-pointer border-b border-gray-700 hover:bg-gray-700';
+          row.innerHTML = `
+            <div class="font-medium text-gray-100">${m['BSE Code']}</div>
+            <div class="text-xs text-gray-300">${m['Company Name']}</div>
+          `;
+          row.addEventListener('click', () => {
+            codeInput.value = m['BSE Code'];
+            nameInput.value = m['Company Name'];
+            panel.classList.add('hidden');
+          });
+          panel.appendChild(row);
+        });
+      }
+      positionPanel();
+      panel.classList.remove('hidden');
+    }
+
+    function searchNow(q) {
+      fetch(`/search?query=${encodeURIComponent(q)}`)
+        .then(r => r.json())
+        .then(data => renderResults((data && data.matches) || []))
+        .catch(() => renderResults([]));
+    }
+
+    nameInput.addEventListener('keyup', () => {
+      clearTimeout(debounceTimer);
+      const q = nameInput.value.trim();
+      if (q.length < 2) {
+        if (resultsPanel) resultsPanel.classList.add('hidden');
+        return;
+      }
+      debounceTimer = setTimeout(() => searchNow(q), 250);
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!resultsPanel) return;
+      if (!nameInput.contains(e.target) && !resultsPanel.contains(e.target)) {
+        resultsPanel.classList.add('hidden');
+      }
+    });
+  </script>
 
 </body>
 </html>

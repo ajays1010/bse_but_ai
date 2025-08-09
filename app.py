@@ -29,6 +29,7 @@ from services.db_service import (
     user_add_telegram,
     user_delete_telegram,
     user_get_profile,
+    service_fetch_profile_by_user_id,
     auth_sign_in,
     auth_sign_up,
 )
@@ -208,7 +209,16 @@ def admin_add_sub(user_id: str):
     code = request.form.get('bse_code','').strip()
     name = request.form.get('company_name','').strip()
     if code and name:
-        admin_upsert_user_sub(user_id, code, name)
+        if admin_upsert_user_sub(user_id, code, name):
+            # Mirror user add flow: trigger immediate check for this user's recipients
+            try:
+                recipients = admin_list_user_telegrams(user_id) or []
+                recipients = [{'chat_id': r['chat_id'], 'user_id': user_id} for r in recipients if r.get('chat_id')]
+                cutoff_time = datetime.now(AppConfig.IST) - timedelta(hours=24)
+                threading.Thread(target=process_new_scrip_task, args=(code, recipients, cutoff_time)).start()
+                log_message(f"[ADMIN] Triggered immediate check for user {user_id} scrip {code}")
+            except Exception as e:
+                log_message(f"[ADMIN] Failed to trigger immediate check for user {user_id}, scrip {code}: {e}")
     return redirect(url_for('admin_user_detail', user_id=user_id))
 
 @app.route('/admin/user/<user_id>/delete_sub', methods=['POST'])
@@ -224,7 +234,14 @@ def admin_delete_sub(user_id: str):
 def admin_add_telegram(user_id: str):
     chat_id = request.form.get('chat_id','').strip()
     if chat_id:
-        admin_add_user_telegram(user_id, chat_id)
+        # Accept both numeric and @username formats; store exactly as provided
+        if admin_add_user_telegram(user_id, chat_id):
+            # Mirror user add flow: send catch-up announcements to this chat
+            try:
+                threading.Thread(target=catch_up_new_recipient, args=(chat_id,)).start()
+                log_message(f"[ADMIN] Triggered catch-up for new telegram {chat_id} (user {user_id})")
+            except Exception as e:
+                log_message(f"[ADMIN] Failed to trigger catch-up for telegram {chat_id}: {e}")
     return redirect(url_for('admin_user_detail', user_id=user_id))
 
 @app.route('/admin/user/<user_id>/delete_telegram', methods=['POST'])
@@ -246,7 +263,7 @@ def auth_login():
     result = auth_sign_in(email, password)
     if not result or not result.get('access_token'):
         return render_template('auth.html', error='Invalid credentials')
-    resp = make_response(redirect(url_for('index')))
+    resp = make_response(redirect(url_for('user_profile_page')))
     # Cookie holds user session token for RLS-bound requests
     set_auth_cookies(resp, {
         'access_token': result['access_token'],
@@ -462,15 +479,27 @@ def delete_recipient():
 
 @app.route('/me')
 def user_profile_page():
+    user_id = request.cookies.get('sb_user_id')
     access_token = request.cookies.get('sb_access_token')
     refresh_token = request.cookies.get('sb_refresh_token')
-    user_id = request.cookies.get('sb_user_id')
-    if not access_token or not user_id:
-        return redirect(url_for('auth_login_page'))
-    profile, new_tokens = user_get_profile(user_id=user_id, access_token=access_token, refresh_token=refresh_token)
+    if not user_id:
+        # As a last resort, render a minimal profile page without data instead of redirect loop
+        return make_response(render_template('auth.html', error='Please log in to view your profile.'))
+    # Try user-scoped path first
+    profile = None
+    new_tokens = None
+    try:
+        if access_token:
+            profile, new_tokens = user_get_profile(user_id=user_id, access_token=access_token, refresh_token=refresh_token)
+    except Exception:
+        profile = None
+    # Fallback: service-level fetch to avoid redirect loop
     if profile is None:
-        return redirect(url_for('auth_logout'))
-    # Also show this user's current subs and telegram ids
+        profile = service_fetch_profile_by_user_id(user_id)
+        subs = admin_list_user_subs(user_id) or []
+        telegrams = admin_list_user_telegrams(user_id) or []
+        return make_response(render_template('me.html', profile=profile or {}, subs=subs, telegrams=telegrams))
+    # Normal flow: user-scoped
     subs, new_tokens2 = user_read_subscriptions(access_token=access_token, refresh_token=refresh_token)
     telegrams, new_tokens3 = user_list_telegrams(user_id=user_id, access_token=access_token, refresh_token=refresh_token)
     response = make_response(render_template('me.html', profile=profile, subs=subs or [], telegrams=telegrams or []))

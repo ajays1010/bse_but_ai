@@ -229,16 +229,28 @@ def user_get_profile(*, user_id: str, access_token: str, refresh_token: Optional
         email = auth_user.email or ''
         metadata = auth_user.user_metadata or {}
         full_name = metadata.get('full_name') or metadata.get('name') or ''
-        # Role from app_users
+        # Role from app_users (use service client to avoid RLS recursion in policies)
         role = 'user'
-        try:
-            role_row = client.table('app_users').select('role').eq('id', auth_user.id).limit(1).execute().data or []
-            if role_row:
-                rv = (role_row[0] or {}).get('role')
-                if isinstance(rv, str) and rv.strip():
-                    role = rv.strip().lower()
-        except Exception:
-            pass
+        sb_service = get_supabase_client()
+        if sb_service:
+            try:
+                role_row = sb_service.table('app_users').select('role').eq('id', auth_user.id).limit(1).execute().data or []
+                if role_row:
+                    rv = (role_row[0] or {}).get('role')
+                    if isinstance(rv, str) and rv.strip():
+                        role = rv.strip().lower()
+            except Exception as e:
+                log_message(f"user_get_profile role lookup failed (service): {e}")
+        else:
+            # Fallback on user client if service client unavailable
+            try:
+                role_row = client.table('app_users').select('role').eq('id', auth_user.id).limit(1).execute().data or []
+                if role_row:
+                    rv = (role_row[0] or {}).get('role')
+                    if isinstance(rv, str) and rv.strip():
+                        role = rv.strip().lower()
+            except Exception as e:
+                log_message(f"user_get_profile role lookup failed (scoped): {e}")
         profile = {
             'id': auth_user.id,
             'email': email,
@@ -253,19 +265,29 @@ def user_get_profile(*, user_id: str, access_token: str, refresh_token: Optional
 
 # --- Admin Functions (Service role) ---
 def is_admin_by_user_id(user_id: str) -> bool:
-    """Check admin by reading role from app_users table (admin/superuser treated as admin)."""
+    """Check admin by reading role from app_users with SERVICE client (avoid RLS recursion).
+    Treats admin/superuser as admin.
+    """
     if not user_id:
         return False
     sb = get_supabase_client()
     if not sb:
         return False
     try:
+        # Use a minimal select that cannot recurse via policy functions
         data = sb.table('app_users').select('role').eq('id', user_id).limit(1).execute().data or []
         if data:
             role_value = (data[0] or {}).get('role')
             return isinstance(role_value, str) and role_value.strip().lower() in {"admin", "superuser"}
         return False
     except Exception as e:
+        # As a last resort, try user-scoped client (may still be blocked by RLS)
+        try:
+            # This path requires the caller to pass a valid access token; not available here.
+            # So we just log and return False to avoid recursion errors.
+            pass
+        except Exception:
+            pass
         log_message(f"is_admin_by_user_id failed: {e}")
         return False
 
@@ -312,6 +334,42 @@ def admin_list_users_for_interface(access_token: str) -> list[dict]:
 def is_admin(user_id: str, access_token: Optional[str] = None) -> bool:
     """Alias to is_admin_by_user_id (role in app_users)."""
     return is_admin_by_user_id(user_id)
+
+
+def service_fetch_profile_by_user_id(user_id: str) -> Optional[dict]:
+    """Fetch a basic profile using the SERVICE client only (no user token required).
+    Returns: { id, email, full_name, role, created_at } or None.
+    """
+    if not user_id:
+        return None
+    sb = get_supabase_client()
+    if not sb:
+        return None
+    email = ''
+    full_name = ''
+    created_at = ''
+    # NOTE: Do not call auth.admin here; some environments don't expose admin with provided key
+    # Role from app_users
+    role = 'user'
+    try:
+        row = sb.table('app_users').select('email, full_name, role, created_at').eq('id', user_id).limit(1).execute().data or []
+        if row:
+            r = row[0] or {}
+            role_val = r.get('role')
+            if isinstance(role_val, str) and role_val.strip():
+                role = role_val.strip().lower()
+            email = r.get('email') or email
+            full_name = r.get('full_name') or full_name
+            created_at = r.get('created_at') or created_at
+    except Exception as e:
+        log_message(f"service_fetch_profile_by_user_id table read failed: {e}")
+    return {
+        'id': user_id,
+        'email': email,
+        'full_name': full_name,
+        'role': role,
+        'created_at': created_at or '1970-01-01T00:00:00Z'
+    }
 
 
 ## Removed bootstrap_admin_if_none: revert to table-driven roles only
@@ -365,9 +423,10 @@ def admin_add_user_telegram(user_id: str, chat_id: str) -> bool:
     if not sb:
         return False
     try:
-        sb.table('user_telegram_ids').insert({
+        # Upsert to avoid duplicates on same (user_id, chat_id)
+        sb.table('user_telegram_ids').upsert({
             'user_id': user_id, 'chat_id': chat_id
-        }).execute()
+        }, on_conflict='chat_id').execute()
         return True
     except Exception as e:
         log_message(f"Admin add user telegram failed: {e}")

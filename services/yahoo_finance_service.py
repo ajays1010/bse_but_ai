@@ -1,6 +1,7 @@
 import yfinance as yf
 from typing import Dict, Any, Optional
 from .ticker_mapping_service import get_best_yahoo_symbol, get_company_name_for_code, ticker_mapper
+from .ai_service import fetch_market_data_via_gemini
 import pandas as pd
 
 
@@ -213,6 +214,26 @@ def get_stock_data_yahoo(scrip_code: str) -> Dict[str, Any]:
             except Exception as alt_e:
                 log_message(f"[YAHOO] Alternative exchange also failed: {alt_e}")
         
+        # Fallback 2: Try Gemini web search for market data
+        try:
+            fallback = fetch_market_data_via_gemini(scrip_code, get_company_name_for_code(scrip_code), yahoo_symbol)
+        except Exception:
+            fallback = None
+        if fallback and (fallback.get("current_price") not in (None, "N/A")):
+            company_name = fallback.get("company_name") or get_company_name_for_code(scrip_code) or "Data unavailable"
+            return {
+                "original_bse_code": scrip_code,
+                "yahoo_symbol": yahoo_symbol,
+                "error": None,
+                "current_price": fallback.get("current_price"),
+                "previous_close": fallback.get("previous_close", "N/A"),
+                "day_change": None,
+                "day_change_percent": fallback.get("day_change_percent", "N/A"),
+                "market_cap": fallback.get("market_cap", "N/A"),
+                "company_name": company_name,
+                "exchange_preference": "gemini_web"
+            }
+
         # Final fallback - return error info
         company_name = get_company_name_for_code(scrip_code) or "Data unavailable"
         return {
