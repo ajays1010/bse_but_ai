@@ -1,8 +1,0 @@
-requests
-gunicorn
-flask
-pytz
-supabase
-apscheduler
-pandas
-datetime
